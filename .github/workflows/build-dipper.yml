@@ -38,12 +38,11 @@ jobs:
   build:
     name: ${{ matrix.variant }}
     runs-on: ubuntu-22.04
-    # 只跑指定变体（workflow_dispatch 时可只跑 susfs，省时间）
-    if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.variant == 'both' || github.event.inputs.variant == matrix.variant }}
     strategy:
       fail-fast: false
       matrix:
-        variant: [nosusfs, susfs]
+        # 手动触发且指定了单一变体时只跑那个（job 级 if 不能引用 matrix，所以用动态 matrix）
+        variant: ${{ (github.event_name == 'workflow_dispatch' && github.event.inputs.variant != 'both') && fromJSON(format('["{0}"]', github.event.inputs.variant)) || fromJSON('["nosusfs","susfs"]') }}
     env:
       ARCH: arm64
       CROSS_COMPILE: aarch64-linux-gnu-
