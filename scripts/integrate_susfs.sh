@@ -48,6 +48,9 @@ bash "$HERE/wire_kernelsu.sh" "$TREE"
 echo "=== [4/5] 注入 BakaSU inline hooks ==="
 bash "$PATCHES/susfs_inline_hook_bakasu.sh" "$TREE"
 
+echo "=== [4.5/5] 修正注入代码在 4.9 上的三处不匹配 ==="
+python3 "$HERE/fixup_4.9_inline_hooks.py" "$TREE"
+
 echo "=== [5/5] 校验 inline_hook_check.mk 所需的 7 个钩子 ==="
 bad=0
 check() { if grep -q "$2" "$1"; then echo "  OK  $1 : $2"; else echo "  BAD $1 : 缺少 $2"; bad=1; fi; }

@@ -9,6 +9,12 @@ name: Build ReSukiSU kernel for Xiaomi Mi 8 (dipper, Android 10, Linux 4.9)
 on:
   workflow_dispatch:
     inputs:
+      variant:
+        description: "构建哪个变体"
+        type: choice
+        options: [both, nosusfs, susfs]
+        default: both
+        required: true
       kernel_repo:
         description: "内核源码仓库"
         default: "https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git"
@@ -32,6 +38,8 @@ jobs:
   build:
     name: ${{ matrix.variant }}
     runs-on: ubuntu-22.04
+    # 只跑指定变体（workflow_dispatch 时可只跑 susfs，省时间）
+    if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.variant == 'both' || github.event.inputs.variant == matrix.variant }}
     strategy:
       fail-fast: false
       matrix:
@@ -54,7 +62,7 @@ jobs:
             git flex bison bc cpio zip unzip rsync libssl-dev libelf-dev \
             gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi python3 make
 
-      - name: Clone kernel source (${{ env.KERNEL_BRANCH }})
+      - name: Clone kernel source
         run: |
           git clone --depth=1 --single-branch -b "$KERNEL_BRANCH" "$KERNEL_REPO" kernel
           echo "kernel_commit=$(git -C kernel rev-parse HEAD)" >> "$GITHUB_ENV"
