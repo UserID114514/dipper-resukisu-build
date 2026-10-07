@@ -1,0 +1,166 @@
+name: Build ReSukiSU kernel for Xiaomi Mi 8 (dipper, Android 10, Linux 4.9)
+
+# 产出两个可刷入内核包（AnyKernel3）：
+#   - dipper-resukisu-nosusfs : 手动钩子模式，不含 SUSFS
+#   - dipper-resukisu-susfs   : SUSFS 内联钩子模式，含 SUSFS
+#
+# 用法：把本目录推到自己的 GitHub 仓库，Actions 里手动 Run workflow。
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_repo:
+        description: "内核源码仓库"
+        default: "https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git"
+        required: true
+      kernel_branch:
+        description: "内核分支（Android 10 官方开源树 = dipper-q-oss, 4.9.186）"
+        default: "dipper-q-oss"
+        required: true
+      kernel_defconfig:
+        description: "defconfig"
+        default: "dipper_user_defconfig"
+        required: true
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.variant }}
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [nosusfs, susfs]
+    env:
+      ARCH: arm64
+      CROSS_COMPILE: aarch64-linux-gnu-
+      CROSS_COMPILE_ARM32: arm-linux-gnueabi-
+      KERNEL_REPO: ${{ github.event.inputs.kernel_repo || 'https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git' }}
+      KERNEL_BRANCH: ${{ github.event.inputs.kernel_branch || 'dipper-q-oss' }}
+      DEFCONFIG: ${{ github.event.inputs.kernel_defconfig || 'dipper_user_defconfig' }}
+    steps:
+      - name: Checkout build scripts
+        uses: actions/checkout@v4
+
+      - name: Install host dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            git flex bison bc cpio zip unzip rsync libssl-dev libelf-dev \
+            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi python3 make
+
+      - name: Clone kernel source (${{ env.KERNEL_BRANCH }})
+        run: |
+          git clone --depth=1 --single-branch -b "$KERNEL_BRANCH" "$KERNEL_REPO" kernel
+          echo "kernel_commit=$(git -C kernel rev-parse HEAD)" >> "$GITHUB_ENV"
+          head -4 kernel/Makefile
+
+      - name: Clone ReSukiSU (BakaSU)
+        run: |
+          # ReSukiSU/ReSukiSU 已更名为 Baka-SU/BakaSU（301 重定向）
+          git clone https://github.com/Baka-SU/BakaSU kernel/KernelSU
+          echo "ksu_commit=$(git -C kernel/KernelSU rev-parse HEAD)" >> "$GITHUB_ENV"
+          git -C kernel/KernelSU log -1 --format='%h %ad %s' --date=short
+
+      # ---------- 不含 SUSFS：手动钩子模式（已本地验证） ----------
+      - name: Integrate KernelSU (manual hook, no SUSFS)
+        if: matrix.variant == 'nosusfs'
+        run: python3 scripts/integrate_ksu.py kernel
+
+      # ---------- 含 SUSFS：SUSFS v2.3.0 内核补丁 + 官方 inline hook 注入 ----------
+      - name: Integrate SUSFS + KernelSU inline hook
+        if: matrix.variant == 'susfs'
+        run: bash scripts/integrate_susfs.sh kernel
+
+      - name: Configure kernel
+        run: |
+          cd kernel
+          scripts/config --file .config 2>/dev/null || true
+          make O=out "$DEFCONFIG"
+          SC="scripts/config --file out/.config"
+          $SC --enable KSU
+          $SC --enable KALLSYMS
+          $SC --enable KALLSYMS_ALL
+          $SC --disable KSU_TRACEPOINT_HOOK
+          $SC --disable COMPAT_VDSO
+          if [ "${{ matrix.variant }}" = "susfs" ]; then
+            $SC --disable KSU_MANUAL_HOOK
+            $SC --enable KSU_SUSFS
+            for o in SUS_PATH SUS_MOUNT SUS_KSTAT SPOOF_UNAME ENABLE_LOG \
+                     HIDE_KSU_SUSFS_SYMBOLS SPOOF_CMDLINE_OR_BOOTCONFIG OPEN_REDIRECT SUS_MAP; do
+              $SC --enable "KSU_SUSFS_$o"
+            done
+          else
+            $SC --disable KSU_SUSFS
+            $SC --enable KSU_MANUAL_HOOK
+            $SC --enable KSU_MANUAL_HOOK_AUTO_SETUID_HOOK
+            $SC --enable KSU_MANUAL_HOOK_AUTO_INITRC_HOOK
+            $SC --enable KSU_MANUAL_HOOK_AUTO_INPUT_HOOK
+          fi
+          make O=out olddefconfig
+          grep -E '^CONFIG_(KSU|KSU_MANUAL_HOOK|KSU_SUSFS|KALLSYMS_ALL)' out/.config | sort
+
+      - name: Build kernel
+        run: |
+          cd kernel
+          # CC 覆盖：小米 CAF 树的 Makefile:364 用 scripts/gcc-wrapper.py 包装 CC（依赖 python2），CI 上无 python2
+          make O=out -j"$(nproc)" \
+               CC="${CROSS_COMPILE}gcc" \
+               KCFLAGS="-Wno-error" HOSTCFLAGS="-fcommon"
+          ls -la out/arch/arm64/boot/
+
+      - name: Package AnyKernel3
+        run: |
+          curl -Lo ak3.zip https://github.com/osm0sis/AnyKernel3/archive/refs/heads/master.zip
+          unzip -q ak3.zip
+          mv AnyKernel3-master AnyKernel3
+          cd AnyKernel3
+          rm -rf .git* README.md *placeholder
+          cp ../kernel/out/arch/arm64/boot/Image.gz-dtb .
+          [ -f ../kernel/out/arch/arm64/boot/dtbo.img ] && cp ../kernel/out/arch/arm64/boot/dtbo.img . || true
+          cat > anykernel.sh <<'EOF'
+          properties() { '
+          kernel.string=ReSukiSU kernel for Xiaomi Mi 8 (dipper)
+          do.devicecheck=1
+          do.modules=0
+          do.cleanup=1
+          do.cleanuponabort=1
+          device.name1=dipper
+          device.name2=Mi 8
+          '; }
+          block=auto
+          is_slot_device=auto
+          ramdisk_compression=auto
+          patch_vbmeta_flag=auto
+          . tools/ak3-core.sh
+          split_boot
+          flash_boot
+          EOF
+          zip -r9 "../dipper-resukisu-${{ matrix.variant }}.zip" * -x .git README.md '*placeholder' || \
+          zip -r9 "../dipper-resukisu-${{ matrix.variant }}.zip" .
+          cd ..
+          ls -la dipper-resukisu-${{ matrix.variant }}.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dipper-resukisu-${{ matrix.variant }}
+          path: |
+            dipper-resukisu-${{ matrix.variant }}.zip
+            kernel/out/arch/arm64/boot/Image.gz-dtb
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dipper-resukisu-${{ matrix.variant }}.zip
+          body: |
+            Xiaomi Mi 8 (dipper) / Android 10 / Linux 4.9
+            kernel: ${{ env.KERNEL_BRANCH }} @ ${{ env.kernel_commit }}
+            ReSukiSU(BakaSU): ${{ env.ksu_commit }}
+            variant: ${{ matrix.variant }}

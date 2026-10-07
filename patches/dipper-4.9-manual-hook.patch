@@ -1,0 +1,243 @@
+diff --git a/drivers/Kconfig b/drivers/Kconfig
+index dfeaec1c..4165543e 100644
+--- a/drivers/Kconfig
++++ b/drivers/Kconfig
+@@ -216,4 +216,5 @@ source "drivers/tee/Kconfig"
+ 
+ source "drivers/halls/Kconfig"
+ 
++source "drivers/kernelsu/Kconfig"
+ endmenu
+diff --git a/drivers/Makefile b/drivers/Makefile
+index 2c4650f7..2e377452 100644
+--- a/drivers/Makefile
++++ b/drivers/Makefile
+@@ -183,3 +183,5 @@ obj-$(CONFIG_SENSORS_SSC)		+= sensors/
+ obj-$(CONFIG_BCM_GPS_SPI_DRIVER) += gps/
+ obj-$(CONFIG_TEE)		+= tee/
+ obj-$(CONFIG_HALLS)		+= halls/
++
++obj-$(CONFIG_KSU) += kernelsu/
+diff --git a/fs/exec.c b/fs/exec.c
+index 25015285..4d2a35bc 100644
+--- a/fs/exec.c
++++ b/fs/exec.c
+@@ -1674,6 +1674,15 @@ static int exec_binprm(struct linux_binprm *bprm)
+ /*
+  * sys_execve() executes a new program.
+  */
++#ifdef CONFIG_KSU_MANUAL_HOOK
++__attribute__((hot))
++extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr,
++				void *argv, void *envp, int *flags);
++__attribute__((hot))
++extern int ksu_handle_post_execveat(int *fd, struct filename **filename_ptr,
++				void *argv, void *envp, int *flags, int *retval);
++#endif
++
+ static int do_execveat_common(int fd, struct filename *filename,
+ 			      struct user_arg_ptr argv,
+ 			      struct user_arg_ptr envp,
+@@ -1685,6 +1694,9 @@ static int do_execveat_common(int fd, struct filename *filename,
+ 	struct files_struct *displaced;
+ 	int retval;
+ 
++#ifdef CONFIG_KSU_MANUAL_HOOK
++	ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);
++#endif
+ 	if (IS_ERR(filename))
+ 		return PTR_ERR(filename);
+ 
+@@ -1793,6 +1805,9 @@ static int do_execveat_common(int fd, struct filename *filename,
+ 	task_numa_free(current);
+ 	free_bprm(bprm);
+ 	kfree(pathbuf);
++#ifdef CONFIG_KSU_MANUAL_HOOK
++	ksu_handle_post_execveat(&fd, &filename, &argv, &envp, &flags, &retval);
++#endif
+ 	putname(filename);
+ 	if (displaced)
+ 		put_files_struct(displaced);
+@@ -1816,6 +1831,9 @@ static int do_execveat_common(int fd, struct filename *filename,
+ 	if (displaced)
+ 		reset_files_struct(displaced);
+ out_ret:
++#ifdef CONFIG_KSU_MANUAL_HOOK
++	ksu_handle_post_execveat(&fd, &filename, &argv, &envp, &flags, &retval);
++#endif
+ 	putname(filename);
+ 	return retval;
+ }
+diff --git a/fs/open.c b/fs/open.c
+index a0fc3782..21daa285 100644
+--- a/fs/open.c
++++ b/fs/open.c
+@@ -360,6 +360,12 @@ SYSCALL_DEFINE4(fallocate, int, fd, int, mode, loff_t, offset, loff_t, len)
+  * We do this by temporarily clearing all FS-related capabilities and
+  * switching the fsuid/fsgid around to the real ones.
+  */
++#ifdef CONFIG_KSU_MANUAL_HOOK
++__attribute__((hot))
++extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user,
++				int *mode, int *flags);
++#endif
++
+ SYSCALL_DEFINE3(faccessat, int, dfd, const char __user *, filename, int, mode)
+ {
+ 	const struct cred *old_cred;
+@@ -370,6 +376,9 @@ SYSCALL_DEFINE3(faccessat, int, dfd, const char __user *, filename, int, mode)
+ 	int res;
+ 	unsigned int lookup_flags = LOOKUP_FOLLOW;
+ 
++#ifdef CONFIG_KSU_MANUAL_HOOK
++	ksu_handle_faccessat(&dfd, &filename, &mode, NULL);
++#endif
+ 	if (mode & ~S_IRWXO)	/* where's F_OK, X_OK, W_OK, R_OK? */
+ 		return -EINVAL;
+ 
+diff --git a/fs/stat.c b/fs/stat.c
+index 068fdbcc..3233e296 100644
+--- a/fs/stat.c
++++ b/fs/stat.c
+@@ -287,6 +287,17 @@ SYSCALL_DEFINE2(newlstat, const char __user *, filename,
+ 	return cp_new_stat(&stat, statbuf);
+ }
+ 
++#ifdef CONFIG_KSU_MANUAL_HOOK
++__attribute__((hot))
++extern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);
++
++__attribute__((hot))
++extern void ksu_handle_newfstat_ret(unsigned int *fd, struct stat __user **statbuf_ptr);
++#if defined(__ARCH_WANT_STAT64) || defined(__ARCH_WANT_COMPAT_STAT64)
++extern void ksu_handle_fstat64_ret(unsigned long *fd, struct stat64 __user **statbuf_ptr);
++#endif
++#endif
++
+ #if !defined(__ARCH_WANT_STAT64) || defined(__ARCH_WANT_SYS_NEWFSTATAT)
+ SYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,
+ 		struct stat __user *, statbuf, int, flag)
+@@ -294,6 +305,9 @@ SYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,
+ 	struct kstat stat;
+ 	int error;
+ 
++#ifdef CONFIG_KSU_MANUAL_HOOK
++	ksu_handle_stat(&dfd, &filename, &flag);
++#endif
+ 	error = vfs_fstatat(dfd, filename, &stat, flag);
+ 	if (error)
+ 		return error;
+@@ -309,6 +323,9 @@ SYSCALL_DEFINE2(newfstat, unsigned int, fd, struct stat __user *, statbuf)
+ 	if (!error)
+ 		error = cp_new_stat(&stat, statbuf);
+ 
++#ifdef CONFIG_KSU_MANUAL_HOOK
++	ksu_handle_newfstat_ret(&fd, &statbuf);
++#endif
+ 	return error;
+ }
+ 
+@@ -427,6 +444,9 @@ SYSCALL_DEFINE2(fstat64, unsigned long, fd, struct stat64 __user *, statbuf)
+ 	if (!error)
+ 		error = cp_new_stat64(&stat, statbuf);
+ 
++#ifdef CONFIG_KSU_MANUAL_HOOK
++	ksu_handle_fstat64_ret(&fd, &statbuf);
++#endif
+ 	return error;
+ }
+ 
+@@ -436,6 +456,9 @@ SYSCALL_DEFINE4(fstatat64, int, dfd, const char __user *, filename,
+ 	struct kstat stat;
+ 	int error;
+ 
++#ifdef CONFIG_KSU_MANUAL_HOOK
++	ksu_handle_stat(&dfd, &filename, &flag);
++#endif
+ 	error = vfs_fstatat(dfd, filename, &stat, flag);
+ 	if (error)
+ 		return error;
+diff --git a/kernel/reboot.c b/kernel/reboot.c
+index bd30a973..d991137f 100644
+--- a/kernel/reboot.c
++++ b/kernel/reboot.c
+@@ -277,6 +277,10 @@ static DEFINE_MUTEX(reboot_mutex);
+  *
+  * reboot doesn't sync: do that yourself before calling this.
+  */
++#ifdef CONFIG_KSU_MANUAL_HOOK
++extern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);
++#endif
++
+ SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,
+ 		void __user *, arg)
+ {
+@@ -284,6 +288,9 @@ SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,
+ 	char buffer[256];
+ 	int ret = 0;
+ 
++#ifdef CONFIG_KSU_MANUAL_HOOK
++	ksu_handle_sys_reboot(magic1, magic2, cmd, &arg);
++#endif
+ 	/* We only trust the superuser with rebooting the system. */
+ 	if (!ns_capable(pid_ns->user_ns, CAP_SYS_BOOT))
+ 		return -EPERM;
+diff --git a/security/selinux/selinuxfs.c b/security/selinux/selinuxfs.c
+index 72c145dd..04a2365a 100644
+--- a/security/selinux/selinuxfs.c
++++ b/security/selinux/selinuxfs.c
+@@ -60,7 +60,7 @@ static int __init checkreqprot_setup(char *str)
+ }
+ __setup("checkreqprot=", checkreqprot_setup);
+ 
+-static DEFINE_MUTEX(sel_mutex);
++DEFINE_MUTEX(sel_mutex);
+ 
+ /* global data for booleans */
+ static struct dentry *bool_dir;
+@@ -257,7 +257,7 @@ static int sel_mmap_handle_status(struct file *filp,
+ 			       size, vma->vm_page_prot);
+ }
+ 
+-static const struct file_operations sel_handle_status_ops = {
++const struct file_operations sel_handle_status_ops = {
+ 	.open		= sel_open_handle_status,
+ 	.read		= sel_read_handle_status,
+ 	.mmap		= sel_mmap_handle_status,
+@@ -719,7 +719,7 @@ static ssize_t sel_write_relabel(struct file *file, char *buf, size_t size);
+ static ssize_t sel_write_user(struct file *file, char *buf, size_t size);
+ static ssize_t sel_write_member(struct file *file, char *buf, size_t size);
+ 
+-static ssize_t (*write_op[])(struct file *, char *, size_t) = {
++ssize_t (*write_op[])(struct file *, char *, size_t) = {
+ 	[SEL_ACCESS] = sel_write_access,
+ 	[SEL_CREATE] = sel_write_create,
+ 	[SEL_RELABEL] = sel_write_relabel,
+diff --git a/security/selinux/ss/services.c b/security/selinux/ss/services.c
+index a6b09709..1638caa5 100644
+--- a/security/selinux/ss/services.c
++++ b/security/selinux/ss/services.c
+@@ -74,7 +74,7 @@ int selinux_policycap_netpeer;
+ int selinux_policycap_openperm;
+ int selinux_policycap_alwaysnetwork;
+ 
+-static DEFINE_RWLOCK(policy_rwlock);
++DEFINE_RWLOCK(policy_rwlock);
+ 
+ static struct sidtab sidtab;
+ struct policydb policydb;
+diff --git a/security/selinux/ss/status.c b/security/selinux/ss/status.c
+index d982365f..56ca9747 100644
+--- a/security/selinux/ss/status.c
++++ b/security/selinux/ss/status.c
+@@ -35,8 +35,8 @@
+  * In most cases, application shall confirm the kernel status is not
+  * changed without any system call invocations.
+  */
+-static struct page *selinux_status_page;
+-static DEFINE_MUTEX(selinux_status_lock);
++struct page *selinux_status_page;
++DEFINE_MUTEX(selinux_status_lock);
+ 
+ /*
+  * selinux_kernel_status_page
