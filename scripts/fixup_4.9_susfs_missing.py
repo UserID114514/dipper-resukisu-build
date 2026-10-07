@@ -55,7 +55,77 @@ s = p.read_text()
 call = s.find("inotify_mark_user_mask(mark)")
 defn = s.find("static inline __u32 inotify_mark_user_mask")
 ok = call > 0 and 0 < defn < call
-print("校验: 调用点@%d 定义@%d -> %s" % (call, defn, "OK" if ok else "FAIL"))
+print("校验(fdinfo): 调用点@%d 定义@%d -> %s" % (call, defn, "OK" if ok else "FAIL"))
+
+# ---------------------------------------------------------------- fs/proc/cmdline.c
+# 4.9.186 的 cmdline.c 比补丁基线（4.9.337/CAF）简单，patch 的 fuzz 把两个 hunk 贴错位置：
+#   - extern 声明被贴进了 cmdline_proc_show() 函数体
+#   - 取 cmdline 的分支被贴到了文件末尾（fs_initcall 之后），成了文件作用域的裸 if -> 编译报错
+# 这里按本树结构重写成正确形态（幂等）。
+p2 = TREE / "fs" / "proc" / "cmdline.c"
+s2 = p2.read_text()
+CORRECT = """#include <linux/fs.h>
+#include <linux/init.h>
+#include <linux/proc_fs.h>
+#include <linux/seq_file.h>
+
+#ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG
+extern struct static_key_false susfs_is_fake_cmdline_or_bootconfig_buffer_set;
+extern void susfs_spoof_cmdline_or_bootconfig(struct seq_file *m);
+#endif
+
+static int cmdline_proc_show(struct seq_file *m, void *v)
+{
+#ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG
+\tif (static_branch_likely(&susfs_is_fake_cmdline_or_bootconfig_buffer_set)) {
+\t\tsusfs_spoof_cmdline_or_bootconfig(m);
+\t\tseq_putc(m, '\\n');
+\t\treturn 0;
+\t}
+#endif
+\tseq_printf(m, "%s\\n", saved_command_line);
+
+\treturn 0;
+}
+
+static int cmdline_proc_open(struct inode *inode, struct file *file)
+{
+\treturn single_open(file, cmdline_proc_show, NULL);
+}
+
+static const struct file_operations cmdline_proc_fops = {
+\t.open\t\t= cmdline_proc_open,
+\t.read\t\t= seq_read,
+\t.llseek\t\t= seq_lseek,
+\t.release\t= single_release,
+};
+
+static int __init proc_cmdline_init(void)
+{
+\tproc_create("cmdline", 0, NULL, &cmdline_proc_fops);
+\treturn 0;
+}
+fs_initcall(proc_cmdline_init);
+"""
+if "SUSFS_SPOOF_CMDLINE" in s2 and "fs_initcall(proc_cmdline_init);\n#ifdef" not in s2 and s2.count("cmdline_proc_show(struct seq_file") == 1 and "\\tseq_printf(m" not in s2:
+    # 已经是正确结构（extern 在函数外 + 分支在函数内 + 文件以 fs_initcall 结尾）
+    if s2.rstrip().endswith("fs_initcall(proc_cmdline_init);") and s2.find("extern struct static_key_false") < s2.find("static int cmdline_proc_show"):
+        print("  [=] fs/proc/cmdline.c: 结构已正确")
+        cmdline_ok = True
+    else:
+        cmdline_ok = False
+else:
+    cmdline_ok = False
+if not cmdline_ok:
+    p2.write_text(CORRECT)
+    changed.append("fs/proc/cmdline.c: 重写为正确结构（修正 fuzz 贴错位置的 hunk）")
+s2 = p2.read_text()
+cmdline_ok = (s2.rstrip().endswith("fs_initcall(proc_cmdline_init);")
+              and s2.find("extern struct static_key_false") < s2.find("static int cmdline_proc_show")
+              and s2.count("#ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG") == 2)
+print("校验(cmdline): 结构正确 =", "OK" if cmdline_ok else "FAIL")
+ok = ok and cmdline_ok
+
 print("完成的改动:")
 for c in changed:
     print("  - " + c)
