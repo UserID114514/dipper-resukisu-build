@@ -153,15 +153,35 @@ jobs:
           cd ..
           ls -la dipper-resukisu-${{ matrix.variant }}.zip
 
-      - name: Upload artifact
+      # 注意：Actions 的 artifact 会占用账号的 Actions 存储配额（免费 500MB，默认保留 90 天）。
+      # 这里只传 22MB 的可刷包、保留 1 天；长期下载走下面的 Release 资产（公开仓库的 Release 资产
+      # 不计入 Actions 存储）。
+      - name: Upload artifact (short retention)
         uses: actions/upload-artifact@v4
         with:
           name: dipper-resukisu-${{ matrix.variant }}
-          path: |
-            dipper-resukisu-${{ matrix.variant }}.zip
-            kernel/out/arch/arm64/boot/Image.gz-dtb
+          path: dipper-resukisu-${{ matrix.variant }}.zip
+          retention-days: 1
+          compression-level: 0   # 已是 zip，别再压一遍
 
-      - name: Attach to release
+      # 手动触发时把产物挂到固定 tag 的 Release 上：长期可用、不占 Actions 存储
+      - name: Publish to release (workflow_dispatch)
+        if: github.event_name == 'workflow_dispatch'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest-${{ matrix.variant }}
+          name: "dipper ReSukiSU build (${{ matrix.variant }})"
+          prerelease: true
+          overwrite_files: true
+          files: dipper-resukisu-${{ matrix.variant }}.zip
+          body: |
+            Xiaomi Mi 8 (dipper) / Android 10 / Linux 4.9
+            kernel: ${{ env.KERNEL_BRANCH }} @ ${{ env.kernel_commit }}
+            ReSukiSU(BakaSU): ${{ env.ksu_commit }}
+            variant: ${{ matrix.variant }}
+            built: ${{ github.run_number }} @ ${{ github.sha }}
+
+      - name: Attach to release (tag push)
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
